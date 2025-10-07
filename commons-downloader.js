@@ -41,7 +41,7 @@ const HASHIDX = flag('hashindex', '.commons-hash-index.ndjson');
 const DEBUG = !!flag('debug', false);
 
 // Year range
-const YEAR_FROM = Number(flag('from', '1500'));
+const YEAR_FROM = Number(flag('from', '1800'));
 const YEAR_TO = Number(flag('to', '2100'));
 
 // endpoints
