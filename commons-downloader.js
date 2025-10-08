@@ -48,10 +48,6 @@ const YEAR_TO = Number(flag('to', '2100'));
 const WD_SPARQL = 'https://query.wikidata.org/sparql';
 const COMMONS_API = 'https://commons.wikimedia.org/w/api.php';
 
-// helpers
-function log(...a) {
-	if (DEBUG) console.log(...a);
-}
 async function ensureDir(p) {
 	await mkdir(p, { recursive: true });
 }
@@ -376,7 +372,10 @@ async function main() {
 
 	for (let si = startIndex; si < slices.length && !done && saved < HARD; si++) {
 		const [a, b] = slices[si];
-		if (DEBUG) console.log(`slice ${a}-${b} (offset=${offset})`);
+		if (DEBUG)
+			console.log(
+				`${new Date().toISOString()} : slice ${a}-${b} (offset=${offset})`
+			);
 
 		while (!done && saved < HARD) {
 			let rows;
@@ -431,7 +430,9 @@ async function main() {
 	}
 
 	await saveJSON(CHECKPOINT, { sliceFrom, sliceTo, offset, saved, done: true });
-	console.log(`Done. Saved ${saved} images. Metadata -> ${NDJSON}`);
+	console.log(
+		`${new Date().toISOString()} : Done. Saved ${saved} images. Metadata -> ${NDJSON}`
+	);
 }
 
 async function processBatch(titles, ctx, incSaved, HARD) {
@@ -467,7 +468,11 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 				});
 				incSaved.count = (incSaved.count || 0) + 1;
 				if (incSaved.count % 25 === 0)
-					console.log(`Saved ${incSaved.count} images so far…`);
+					console.log(
+						`${new Date().toISOString()} : Saved ${
+							incSaved.count
+						} images so far…`
+					);
 			} catch (e) {
 				if (DEBUG) console.warn('skip', title, '-', e.message || e);
 			}
@@ -477,6 +482,7 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 	);
 }
 main().catch((e) => {
+	console.error(new Date().toISOString());
 	console.error(e);
 	process.exit(1);
 });
