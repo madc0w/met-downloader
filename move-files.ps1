@@ -5,7 +5,10 @@ while ($true) {
 
         Write-Host "Moving files from $source to $destination..."
 
-        mv "$source\*" "$destination" -Include *.png,*.jpg -Force
+        mv -Force "$source\*.png" "$destination"
+        mv -Force "$source\*.jpg" "$destination"
+        mv -Force "$source\*.jpeg" "$destination"
+        mv -Force "$source\*.webp" "$destination"
         Write-Host "Move completed at $(Get-Date). Waiting 60 seconds..."
     }
     catch {
