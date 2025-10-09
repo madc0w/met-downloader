@@ -30,9 +30,9 @@ function flag(name, d) {
 }
 
 const OUT_DIR = flag('out', 'images-commons');
-const LIMIT = Number(flag('limit', '200')); // stop after N saves (default 200)
-const BATCH = Math.max(1, Number(flag('batch', '200'))); // SPARQL rows per page (<= 1000)
-const OFFSET = Math.max(0, Number(flag('offset', '0'))); // SPARQL offset start
+// const LIMIT = Number(flag('limit', '200')); // stop after N saves (default 200)
+// const BATCH = Math.max(1, Number(flag('batch', '200'))); // SPARQL rows per page (<= 1000)
+// const OFFSET = Math.max(0, Number(flag('offset', '0'))); // SPARQL offset start
 const DELAY_MS = Math.max(0, Number(flag('delay', '150'))); // polite delay per image
 const RESTART_DELAY_MS = Math.max(1000, Number(flag('restartDelay', '15000'))); // wait before auto-restart after a crash
 const CONCURRENCY = Math.max(1, Number(flag('concurrency', '3')));
@@ -42,7 +42,7 @@ const HASHIDX = flag('hashindex', '.commons-hash-index.ndjson');
 const DEBUG = !!flag('debug', false);
 // Allowed licenses (comma-separated tokens). Defaults to PD and CC0 only.
 // Accepts tokens: PD, CC0, CC-BY, CC-BY-SA, ANY-CC
-const LICENSES = String(flag('licenses', 'PD,CC0'))
+const LICENSES = String(flag('licenses', 'ANY-CC'))
 	.split(',')
 	.map((s) => s.trim().toUpperCase())
 	.filter(Boolean);
@@ -407,6 +407,39 @@ async function runPool(items, worker, conc) {
 	}
 }
 
+function createQuota(limit, initialSaved = 0) {
+	if (!isFinite(limit) || limit <= 0) {
+		return {
+			take() {
+				// unlimited: always allow; return a no-op token
+				return { commit() {}, release() {} };
+			},
+			left() {
+				return Infinity;
+			},
+		};
+	}
+	let remaining = Math.max(0, limit - (initialSaved || 0));
+	return {
+		take() {
+			if (remaining <= 0) return null;
+			remaining--;
+			let committed = false;
+			return {
+				commit() {
+					committed = true;
+				},
+				release() {
+					if (!committed) remaining++;
+				},
+			};
+		},
+		left() {
+			return remaining;
+		},
+	};
+}
+
 async function main() {
 	await ensureDir(OUT_DIR);
 	await loadHashIndex();
@@ -420,9 +453,11 @@ async function main() {
 	};
 	let { sliceFrom, sliceTo, offset, saved, done } = ck;
 
-	const HARD = LIMIT > 0 ? LIMIT : Infinity;
+	// const HARD = LIMIT > 0 ? LIMIT : Infinity;
+	const HARD = Infinity;
+	const quota = createQuota(HARD, saved);
 	const span = 25; // size of each year window
-	const pageSize = Math.max(1, Math.min(500, Number(flag('batch', '100'))));
+	const pageSize = Math.max(1, Math.min(500, Number(flag('batch', '200'))));
 
 	// resume logic: pick up at current sliceFrom..sliceTo
 	const slices = Array.from(yearSlices(YEAR_FROM, YEAR_TO, span));
@@ -465,7 +500,8 @@ async function main() {
 				ctx.push({ title, r });
 			}
 			if (titles.length) {
-				await processBatch(titles, ctx, () => saved++, HARD);
+				const counter = { inc: () => (saved += 1), get: () => saved };
+				await processBatch(titles, ctx, counter, HARD, quota);
 			}
 
 			offset += pageSize;
@@ -509,7 +545,7 @@ async function main() {
 	);
 }
 
-async function processBatch(titles, ctx, incSaved, HARD) {
+async function processBatch(titles, ctx, counter, HARD, quota) {
 	// 1) license check on Commons (retry this batch a few times if it fails transiently)
 	let info;
 	for (let attempt = 1; attempt <= 3; attempt++) {
@@ -539,7 +575,10 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 	await runPool(
 		todo,
 		async ({ title, meta, r }) => {
-			if (LIMIT > 0 && (incSaved.count || 0) >= HARD) return;
+			// if (LIMIT > 0 && counter.get() >= HARD) return;
+			// Acquire a quota token to strictly enforce global limit with concurrency
+			const token = quota.take();
+			if (!token) return; // out of quota, skip
 			const url = filePathUrl(title);
 			const base = join(OUT_DIR, filename(r.title, r.creator, r.year));
 			try {
@@ -557,20 +596,20 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 						sha256: res.sha256,
 						bytes: res.bytes,
 					});
-					// Keep both the outer saved counter (via function) and a local count for logging
-					if (typeof incSaved === 'function') incSaved();
-					incSaved.count = (incSaved.count || 0) + 1;
-					if (incSaved.count % 25 === 0)
+					counter.inc();
+					token.commit();
+					const total = counter.get();
+					if (total % 25 === 0)
 						console.log(
-							`${new Date().toISOString()} : Saved ${
-								incSaved.count
-							} images so far…`
+							`${new Date().toISOString()} : Saved ${total} images so far…`
 						);
 				} else if (DEBUG) {
 					console.warn('duplicate, skipped', title, '->', res.duplicateOf);
+					token.release();
 				}
 			} catch (e) {
 				if (DEBUG) console.warn('skip', title, '-', e.message || e);
+				token.release();
 			}
 			if (DELAY_MS) await sleep(DELAY_MS);
 		},
