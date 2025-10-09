@@ -34,6 +34,7 @@ const LIMIT = Number(flag('limit', '200')); // stop after N saves (default 200)
 const BATCH = Math.max(1, Number(flag('batch', '200'))); // SPARQL rows per page (<= 1000)
 const OFFSET = Math.max(0, Number(flag('offset', '0'))); // SPARQL offset start
 const DELAY_MS = Math.max(0, Number(flag('delay', '150'))); // polite delay per image
+const RESTART_DELAY_MS = Math.max(1000, Number(flag('restartDelay', '15000'))); // wait before auto-restart after a crash
 const CONCURRENCY = Math.max(1, Number(flag('concurrency', '3')));
 const CHECKPOINT = flag('checkpoint', '.commons.ckpt.json');
 const NDJSON = flag('ndjson', 'commons-metadata.ndjson');
@@ -41,7 +42,7 @@ const HASHIDX = flag('hashindex', '.commons-hash-index.ndjson');
 const DEBUG = !!flag('debug', false);
 
 // Year range
-const YEAR_FROM = Number(flag('from', '1850'));
+const YEAR_FROM = Number(flag('from', '1900'));
 const YEAR_TO = Number(flag('to', '2100'));
 
 // endpoints
@@ -131,11 +132,30 @@ function extFor(kind) {
 }
 
 async function downloadValidated(url, destBase) {
-	const res = await fetch(url, {
-		redirect: 'follow',
-		headers: { Accept: '*/*', 'User-Agent': 'commons-downloader/1.0' },
-	});
-	if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+	// retry a few times on transient failures or 5xx/429
+	const needsRetry = (code) => [429, 500, 502, 503, 504].includes(code);
+	let res;
+	for (let attempt = 1; attempt <= 5; attempt++) {
+		try {
+			res = await fetch(url, {
+				redirect: 'follow',
+				headers: { Accept: '*/*', 'User-Agent': 'commons-downloader/1.0' },
+			});
+			if (res.ok) break;
+			if (!needsRetry(res.status))
+				throw new Error(`HTTP ${res.status} for ${url}`);
+		} catch (e) {
+			// network/timeout -> retry
+			if (attempt >= 5) throw e;
+		}
+		const backoff =
+			Math.min(15000, 500 * Math.pow(2, attempt - 1)) +
+			Math.floor(Math.random() * 200);
+		if (DEBUG)
+			console.warn(`download retry ${attempt}/5 in ${backoff} ms for ${url}`);
+		await new Promise((r) => setTimeout(r, backoff));
+	}
+	if (!res || !res.ok) throw new Error(`HTTP ${res?.status} for ${url}`);
 
 	const tmp = destBase + '.part';
 	let head = Buffer.alloc(0);
@@ -266,16 +286,35 @@ async function fetchCommonsInfoChunk(titles) {
 		// MediaWiki API accepts POST with large payloads safely
 		titles: titles.join('|'),
 	});
-	const res = await fetch(COMMONS_API, {
-		method: 'POST',
-		headers: {
-			'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-			'User-Agent': 'commons-downloader/1.2',
-		},
-		body: params,
-	});
-	if (!res.ok) throw new Error(`Commons HTTP ${res.status}`);
-	const js = await res.json();
+	const needsRetry = (code) => [429, 500, 502, 503, 504].includes(code);
+	let js;
+	for (let attempt = 1; attempt <= 6; attempt++) {
+		let res;
+		try {
+			res = await fetch(COMMONS_API, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+					'User-Agent': 'commons-downloader/1.2',
+				},
+				body: params,
+			});
+			if (res.ok) {
+				js = await res.json();
+				break;
+			}
+			if (!needsRetry(res.status))
+				throw new Error(`Commons HTTP ${res.status}`);
+		} catch (e) {
+			if (attempt >= 6) throw e;
+		}
+		const backoff =
+			Math.min(15000, 500 * Math.pow(2, attempt - 1)) +
+			Math.floor(Math.random() * 200);
+		if (DEBUG) console.warn(`Commons retry ${attempt}/6 in ${backoff} ms…`);
+		await new Promise((r) => setTimeout(r, backoff));
+	}
+	if (!js) throw new Error('Commons retries exhausted');
 	const pages = js?.query?.pages || {};
 	const out = new Map();
 	for (const k of Object.keys(pages)) {
@@ -436,8 +475,23 @@ async function main() {
 }
 
 async function processBatch(titles, ctx, incSaved, HARD) {
-	// 1) license check on Commons
-	const info = await fetchCommonsInfo(titles);
+	// 1) license check on Commons (retry this batch a few times if it fails transiently)
+	let info;
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		try {
+			info = await fetchCommonsInfo(titles);
+			break;
+		} catch (e) {
+			if (attempt >= 3) throw e;
+			const backoff =
+				1000 * attempt * attempt + Math.floor(Math.random() * 300);
+			if (DEBUG)
+				console.warn(
+					`Batch license lookup retry ${attempt}/3 in ${backoff} ms…`
+				);
+			await new Promise((r) => setTimeout(r, backoff));
+		}
+	}
 	// 2) keep only PD/CC0
 	const todo = [];
 	for (const { title, r } of ctx) {
@@ -481,8 +535,24 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 		CONCURRENCY
 	);
 }
-main().catch((e) => {
-	console.error(new Date().toISOString());
-	console.error(e);
-	process.exit(1);
-});
+
+async function startLoop() {
+	// Auto-restart the run on unhandled errors; resume from checkpoint
+	let attempt = 0;
+	for (;;) {
+		try {
+			await main();
+			break; // finished successfully
+		} catch (e) {
+			attempt++;
+			console.error(new Date().toISOString());
+			console.error(e);
+			console.warn(
+				`${new Date().toISOString()} : Run failed (attempt ${attempt}). Restarting in ${RESTART_DELAY_MS} ms…`
+			);
+			await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
+		}
+	}
+}
+
+startLoop();
