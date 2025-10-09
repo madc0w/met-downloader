@@ -48,7 +48,7 @@ const LICENSES = String(flag('licenses', 'ANY-CC'))
 	.filter(Boolean);
 
 // Year range
-const YEAR_FROM = Number(flag('from', '1950'));
+const YEAR_FROM = Number(flag('from', '1500'));
 const YEAR_TO = Number(flag('to', '2100'));
 
 // endpoints
@@ -222,12 +222,58 @@ async function fetchWikidataBatchPaged({
 	limit = 100,
 	offset = 0,
 }) {
-	const query = `
-SELECT ?item ?itemLabel ?creatorLabel ?year ?file WHERE {
-  ?item wdt:P31 wd:Q3305213 .            # instance of painting
+	// 	const query = `
+	// SELECT ?item ?itemLabel ?creatorLabel ?year ?file WHERE {
+	//   ?item wdt:P31 wd:Q3305213 .            # instance of painting
+	//   ?item wdt:P18 ?file .                   # has image (Commons file)
+	//   OPTIONAL { ?item wdt:P571 ?date . BIND(YEAR(?date) AS ?year) }
+	//   OPTIONAL { ?item wdt:P170 ?creator . }  # creator
+	//   FILTER(bound(?year) && ?year >= ${yearFrom} && ?year <= ${yearTo})
+	//   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+	// }
+	// ORDER BY ?item
+	// LIMIT ${limit}
+	// OFFSET ${offset}
+	// `.trim();
+
+	const query =
+		`SELECT ?item ?itemLabel ?subjectLabel ?typeLabel ?year ?file WHERE {
   ?item wdt:P18 ?file .                   # has image (Commons file)
+
   OPTIONAL { ?item wdt:P571 ?date . BIND(YEAR(?date) AS ?year) }
-  OPTIONAL { ?item wdt:P170 ?creator . }  # creator
+  OPTIONAL { ?item wdt:P170 ?creator . }
+
+  # EITHER: the item’s main subject is within science/math/technology
+  {
+    ?item wdt:P921 ?subject .
+    ?subject wdt:P279* ?broad .
+    VALUES ?broad {
+      wd:Q336     # science
+      wd:Q7991    # natural science
+      wd:Q395     # mathematics
+      wd:Q11016   # technology
+      wd:Q11023   # engineering
+    }
+  }
+  UNION
+  # OR: the item is a natural/technological object (by instance-of hierarchy)
+  {
+    ?item wdt:P31/wdt:P279* ?type .
+    VALUES ?type {
+      wd:Q6999    # astronomical object
+      wd:Q1183543 # scientific instrument
+      wd:Q11019   # machine
+      wd:Q39546   # tool
+      wd:Q42889   # vehicle
+      wd:Q68      # computer
+      wd:Q869     # mineral
+      wd:Q42603   # fossil
+      wd:Q8063    # rock
+      wd:Q756     # plant
+      wd:Q729     # animal
+      wd:Q677     # microorganism
+    }
+  }
   FILTER(bound(?year) && ?year >= ${yearFrom} && ?year <= ${yearTo})
   SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
 }

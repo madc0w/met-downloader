@@ -1,2 +1,5 @@
 images-commons
+images-commons-*
 node_modules
+*.jpg
+

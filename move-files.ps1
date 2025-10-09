@@ -1,7 +1,7 @@
 while ($true) {
     try {
         $source = "C:\Users\mad\git\met-downloader\images-commons"
-        $destination = "\\TINYTIM\Quaffle\Multimedia\Misc\museum pieces and paintings"
+        $destination = "\\TINYTIM\Quaffle\Multimedia\Misc\science and tech"
 
         Write-Host "Moving files from $source to $destination..."
 
