@@ -40,9 +40,15 @@ const CHECKPOINT = flag('checkpoint', '.commons.ckpt.json');
 const NDJSON = flag('ndjson', 'commons-metadata.ndjson');
 const HASHIDX = flag('hashindex', '.commons-hash-index.ndjson');
 const DEBUG = !!flag('debug', false);
+// Allowed licenses (comma-separated tokens). Defaults to PD and CC0 only.
+// Accepts tokens: PD, CC0, CC-BY, CC-BY-SA, ANY-CC
+const LICENSES = String(flag('licenses', 'PD,CC0'))
+	.split(',')
+	.map((s) => s.trim().toUpperCase())
+	.filter(Boolean);
 
 // Year range
-const YEAR_FROM = Number(flag('from', '1900'));
+const YEAR_FROM = Number(flag('from', '1950'));
 const YEAR_TO = Number(flag('to', '2100'));
 
 // endpoints
@@ -324,13 +330,29 @@ async function fetchCommonsInfoChunk(titles) {
 		if (!t || !ii) continue;
 		const meta = ii?.extmetadata || {};
 		const short = meta?.LicenseShortName?.value || meta?.License?.value || '';
-		const pd = /public\s*domain/i.test(short);
-		const cc0 = /cc0/i.test(short);
+		const licenseUp = short.toUpperCase();
+		// Normalize separators to '-' and collapse repeats
+		const norm = licenseUp.replace(/[^A-Z0-9]+/g, '-').replace(/-+/g, '-');
+		// Examples covered:
+		//  - 'Public domain', 'PUBLIC-DOMAIN', 'PD', 'PD-US'
+		//  - 'CC BY 4.0', 'CC-BY', 'Creative Commons Attribution'
+		//  - 'CC BY-SA 4.0', 'CC-BY-SA', 'Attribution-ShareAlike'
+		const pd = /(^|-)PD(-|$)/.test(norm) || /PUBLIC-DOMAIN/.test(norm);
+		const cc0 = /CC0/.test(norm);
+		const ccby = /CC-BY(?!-SA)/.test(norm) || /ATTRIBUTION/.test(licenseUp);
+		const ccbysa = /CC-BY-SA/.test(norm) || /ATTRIBUTION-SHAREALIKE/.test(norm);
+		const anycc = /^CC-/.test(norm) || licenseUp.includes('CREATIVE COMMONS');
+		let isOpen = false;
+		if (LICENSES.includes('PD') && pd) isOpen = true;
+		if (LICENSES.includes('CC0') && cc0) isOpen = true;
+		if (LICENSES.includes('CC-BY') && ccby) isOpen = true;
+		if (LICENSES.includes('CC-BY-SA') && ccbysa) isOpen = true;
+		if (LICENSES.includes('ANY-CC') && anycc) isOpen = true;
 		out.set(t, {
 			url: ii.url,
 			mime: ii.mime,
 			licenseShort: short,
-			isOpen: pd || cc0,
+			isOpen,
 		});
 	}
 	return out;
@@ -468,7 +490,20 @@ async function main() {
 		});
 	}
 
-	await saveJSON(CHECKPOINT, { sliceFrom, sliceTo, offset, saved, done: true });
+	// Finalize checkpoint as done without resetting slice progress.
+	// Load the latest checkpoint on disk (which was updated during the run)
+	// and just mark it done while preserving its sliceFrom/sliceTo/offset.
+	const latestCk = (await loadJSON(CHECKPOINT)) || {
+		sliceFrom,
+		sliceTo,
+		offset,
+		saved,
+	};
+	await saveJSON(CHECKPOINT, {
+		...latestCk,
+		saved,
+		done: true,
+	});
 	console.log(
 		`${new Date().toISOString()} : Done. Saved ${saved} images. Metadata -> ${NDJSON}`
 	);
@@ -504,29 +539,36 @@ async function processBatch(titles, ctx, incSaved, HARD) {
 	await runPool(
 		todo,
 		async ({ title, meta, r }) => {
-			if (LIMIT > 0 && incSaved.count >= HARD) return;
+			if (LIMIT > 0 && (incSaved.count || 0) >= HARD) return;
 			const url = filePathUrl(title);
 			const base = join(OUT_DIR, filename(r.title, r.creator, r.year));
 			try {
 				const res = await downloadValidated(url, base);
-				await appendNDJSON(NDJSON, {
-					qid: r.qid,
-					title: r.title,
-					creator: r.creator,
-					year: r.year,
-					commons_title: title,
-					license: meta.licenseShort,
-					source_url: meta.url,
-					sha256: res.sha256,
-					bytes: res.bytes,
-				});
-				incSaved.count = (incSaved.count || 0) + 1;
-				if (incSaved.count % 25 === 0)
-					console.log(
-						`${new Date().toISOString()} : Saved ${
-							incSaved.count
-						} images so far…`
-					);
+				// Only treat as a new saved image if not a duplicate
+				if (!res.skipped) {
+					await appendNDJSON(NDJSON, {
+						qid: r.qid,
+						title: r.title,
+						creator: r.creator,
+						year: r.year,
+						commons_title: title,
+						license: meta.licenseShort,
+						source_url: meta.url,
+						sha256: res.sha256,
+						bytes: res.bytes,
+					});
+					// Keep both the outer saved counter (via function) and a local count for logging
+					if (typeof incSaved === 'function') incSaved();
+					incSaved.count = (incSaved.count || 0) + 1;
+					if (incSaved.count % 25 === 0)
+						console.log(
+							`${new Date().toISOString()} : Saved ${
+								incSaved.count
+							} images so far…`
+						);
+				} else if (DEBUG) {
+					console.warn('duplicate, skipped', title, '->', res.duplicateOf);
+				}
 			} catch (e) {
 				if (DEBUG) console.warn('skip', title, '-', e.message || e);
 			}
