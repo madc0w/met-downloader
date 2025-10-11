@@ -34,12 +34,20 @@ const OUT_DIR = flag('out', 'images-commons');
 // const BATCH = Math.max(1, Number(flag('batch', '200'))); // SPARQL rows per page (<= 1000)
 // const OFFSET = Math.max(0, Number(flag('offset', '0'))); // SPARQL offset start
 const DELAY_MS = Math.max(0, Number(flag('delay', '150'))); // polite delay per image
+// Wikidata SPARQL pacing and timeouts
+const WD_DELAY_MS = Math.max(0, Number(flag('wdDelay', '2000'))); // pause between SPARQL pages
+const WD_TIMEOUT_MS = Math.max(5000, Number(flag('wdTimeout', '45000'))); // per SPARQL request timeout
+// Commons/HTTP timeouts
+const HTTP_TIMEOUT_MS = Math.max(5000, Number(flag('httpTimeout', '30000')));
 const RESTART_DELAY_MS = Math.max(1000, Number(flag('restartDelay', '15000'))); // wait before auto-restart after a crash
-const CONCURRENCY = Math.max(1, Number(flag('concurrency', '3')));
+const CONCURRENCY = Math.max(1, Number(flag('concurrency', '2')));
 const CHECKPOINT = flag('checkpoint', '.commons.ckpt.json');
 const NDJSON = flag('ndjson', 'commons-metadata.ndjson');
 const HASHIDX = flag('hashindex', '.commons-hash-index.ndjson');
-const DEBUG = !!flag('debug', false);
+const DEBUG = !!flag('debug', true);
+const NO_NDJSON = !!flag('noNdjson', true);
+const NO_LICENSE_FILTER = !!flag('noLicenseFilter', true);
+const USER_AGENT = String(flag('ua', 'commons-downloader/1.3'));
 // Allowed licenses (comma-separated tokens). Defaults to PD and CC0 only.
 // Accepts tokens: PD, CC0, CC-BY, CC-BY-SA, ANY-CC
 const LICENSES = String(flag('licenses', 'ANY-CC'))
@@ -48,7 +56,7 @@ const LICENSES = String(flag('licenses', 'ANY-CC'))
 	.filter(Boolean);
 
 // Year range
-const YEAR_FROM = Number(flag('from', '1500'));
+const YEAR_FROM = Number(flag('from', '1800'));
 const YEAR_TO = Number(flag('to', '2100'));
 
 // endpoints
@@ -86,13 +94,6 @@ function sanitize(s) {
 		.replace(/\s+/g, ' ')
 		.trim()
 		.slice(0, 180);
-}
-
-function filename(baseTitle, artist, year) {
-	const t = sanitize(baseTitle || 'Untitled');
-	const a = sanitize(artist || 'Unknown');
-	const y = year ? String(year) : '';
-	return `${a}${y ? ` (${y})` : ''} - ${t}`;
 }
 
 // hash + validate
@@ -143,10 +144,14 @@ async function downloadValidated(url, destBase) {
 	let res;
 	for (let attempt = 1; attempt <= 5; attempt++) {
 		try {
+			const ac = new AbortController();
+			const t = setTimeout(() => ac.abort(), HTTP_TIMEOUT_MS);
 			res = await fetch(url, {
 				redirect: 'follow',
-				headers: { Accept: '*/*', 'User-Agent': 'commons-downloader/1.0' },
+				headers: { Accept: '*/*', 'User-Agent': USER_AGENT },
+				signal: ac.signal,
 			});
+			clearTimeout(t);
 			if (res.ok) break;
 			if (!needsRetry(res.status))
 				throw new Error(`HTTP ${res.status} for ${url}`);
@@ -236,48 +241,48 @@ async function fetchWikidataBatchPaged({
 	// OFFSET ${offset}
 	// `.trim();
 
-	const query =
-		`SELECT ?item ?itemLabel ?subjectLabel ?typeLabel ?year ?file WHERE {
-  ?item wdt:P18 ?file .                   # has image (Commons file)
+	const query = `
+PREFIX wd:  <http://www.wikidata.org/entity/>
+PREFIX wdt: <http://www.wikidata.org/prop/direct/>
+PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
+SELECT ?file WHERE {
+  ?item wdt:P571 ?date ;
+		wdt:P18  ?file ;
+		wdt:P31/wdt:P279* ?type .
+  FILTER(
+	?date >= "${yearFrom}-01-01T00:00:00Z"^^xsd:dateTime &&
+	?date <= "${yearTo}-12-31T23:59:59Z"^^xsd:dateTime
+  )
 
-  OPTIONAL { ?item wdt:P571 ?date . BIND(YEAR(?date) AS ?year) }
-  OPTIONAL { ?item wdt:P170 ?creator . }
-
-  # EITHER: the item’s main subject is within science/math/technology
-  {
-    ?item wdt:P921 ?subject .
-    ?subject wdt:P279* ?broad .
-    VALUES ?broad {
-      wd:Q336     # science
-      wd:Q7991    # natural science
-      wd:Q395     # mathematics
-      wd:Q11016   # technology
-      wd:Q11023   # engineering
-    }
-  }
-  UNION
-  # OR: the item is a natural/technological object (by instance-of hierarchy)
-  {
-    ?item wdt:P31/wdt:P279* ?type .
-    VALUES ?type {
-      wd:Q6999    # astronomical object
-      wd:Q1183543 # scientific instrument
-      wd:Q11019   # machine
-      wd:Q39546   # tool
-      wd:Q42889   # vehicle
-      wd:Q68      # computer
-      wd:Q869     # mineral
-      wd:Q42603   # fossil
-      wd:Q8063    # rock
-      wd:Q756     # plant
-      wd:Q729     # animal
-      wd:Q677     # microorganism
-    }
-  }
-  FILTER(bound(?year) && ?year >= ${yearFrom} && ?year <= ${yearTo})
-  SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
+  VALUES ?type {
+	wd:Q1183543  # scientific instrument
+	wd:Q11019    # machine
+	wd:Q39546    # tool
+	wd:Q68       # computer
+	wd:Q338      # telescope
+	wd:Q11009    # microscope
+	wd:Q42889    # vehicle
+	wd:Q7397     # software
+	wd:Q869     # mineral
+    wd:Q42603   # fossil
+    wd:Q8063    # rock
+    wd:Q756     # plant
+    wd:Q729     # animal
+    wd:Q677     # microorganism
+	wd:Q16521   # anatomical structure
+	wd:Q1075    # chemical compound
+	wd:Q11173   # chemical element
+	wd:Q11423   # alloy
+	wd:Q11436   # chemical mixture
+	wd:Q12136   # polymer
 }
-ORDER BY ?item
+
+  # Exclude artworks and buildings
+  MINUS { ?item wdt:P31/wdt:P279* wd:Q3305213 } # painting
+  MINUS { ?item wdt:P31/wdt:P279* wd:Q838948 }  # work of art
+  MINUS { ?item wdt:P31/wdt:P279* wd:Q811979 }  # architectural structure
+  MINUS { ?item wdt:P31/wdt:P279* wd:Q24398318 } # religious building
+}
 LIMIT ${limit}
 OFFSET ${offset}
 `.trim();
@@ -285,37 +290,64 @@ OFFSET ${offset}
 	const body = new URLSearchParams({ query, format: 'json' });
 	const url = WD_SPARQL;
 	const needsRetry = (code) => [429, 500, 502, 503, 504].includes(code);
+	let lastStatus = null;
+	let lastError = null;
 
 	for (let attempt = 1; attempt <= 6; attempt++) {
-		const res = await fetch(url, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-				Accept: 'application/sparql-results+json',
-				'User-Agent': 'commons-downloader/1.1',
-			},
-			body,
-		});
-		if (res.ok) {
-			const js = await res.json();
-			const rows = js?.results?.bindings || [];
-			return rows.map((r) => ({
-				qid: r.item?.value?.split('/').pop(),
-				title: r.itemLabel?.value,
-				creator: r.creatorLabel?.value,
-				year: r.year ? Number(r.year.value) : null,
-				commonsFile: r.file?.value,
-			}));
+		let res;
+		try {
+			const ac = new AbortController();
+			const t = setTimeout(() => ac.abort(), WD_TIMEOUT_MS);
+			res = await fetch(url, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+					Accept: 'application/sparql-results+json',
+					'User-Agent': USER_AGENT,
+				},
+				body,
+				signal: ac.signal,
+			});
+			clearTimeout(t);
+			lastStatus = res.status;
+			if (res.ok) {
+				const js = await res.json();
+				const rows = js?.results?.bindings || [];
+				return rows
+					.map((r) => r.file?.value)
+					.filter((v) => typeof v === 'string' && v.length > 0);
+			}
+			if (!needsRetry(res.status)) throw new Error(`WD HTTP ${res.status}`);
+			if (DEBUG) {
+				// Try to read a short error snippet (non-fatal if it fails)
+				try {
+					const txt = await res.text();
+					const snippet = (txt || '').slice(0, 200).replace(/\s+/g, ' ');
+					console.warn(`WD ${res.status} body: ${snippet}`);
+				} catch {}
+			}
+		} catch (e) {
+			lastError = e;
+			if (attempt >= 6) throw e;
 		}
-		if (!needsRetry(res.status)) throw new Error(`WD HTTP ${res.status}`);
 		const backoff =
 			Math.min(15000, 500 * Math.pow(2, attempt - 1)) +
 			Math.floor(Math.random() * 200);
 		if (DEBUG)
-			console.warn(`WD ${res.status}, retry ${attempt}/6 in ${backoff} ms…`);
+			console.warn(
+				`WD ${lastStatus ?? 'ERR'}, retry ${attempt}/6 in ${backoff} ms…`
+			);
 		await new Promise((r) => setTimeout(r, backoff));
 	}
-	throw new Error('WD retries exhausted');
+	throw new Error(
+		`WD retries exhausted${
+			lastStatus
+				? ` (last status ${lastStatus})`
+				: lastError
+				? ` (${lastError.message || lastError})`
+				: ''
+		}`
+	);
 }
 
 function* yearSlices(from, to, span) {
@@ -343,14 +375,18 @@ async function fetchCommonsInfoChunk(titles) {
 	for (let attempt = 1; attempt <= 6; attempt++) {
 		let res;
 		try {
+			const ac = new AbortController();
+			const t = setTimeout(() => ac.abort(), HTTP_TIMEOUT_MS);
 			res = await fetch(COMMONS_API, {
 				method: 'POST',
 				headers: {
 					'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-					'User-Agent': 'commons-downloader/1.2',
+					'User-Agent': USER_AGENT,
 				},
 				body: params,
+				signal: ac.signal,
 			});
+			clearTimeout(t);
 			if (res.ok) {
 				js = await res.json();
 				break;
@@ -502,8 +538,8 @@ async function main() {
 	// const HARD = LIMIT > 0 ? LIMIT : Infinity;
 	const HARD = Infinity;
 	const quota = createQuota(HARD, saved);
-	const span = 25; // size of each year window
-	const pageSize = Math.max(1, Math.min(500, Number(flag('batch', '200'))));
+	const span = Math.max(1, Number(flag('yearsPerSlice', '2'))); // size of each year window
+	const pageSize = Math.max(1, Math.min(500, Number(flag('batch', '20'))));
 
 	// resume logic: pick up at current sliceFrom..sliceTo
 	const slices = Array.from(yearSlices(YEAR_FROM, YEAR_TO, span));
@@ -519,38 +555,64 @@ async function main() {
 				`${new Date().toISOString()} : slice ${a}-${b} (offset=${offset})`
 			);
 
+		const pageRetries = Math.max(0, Number(flag('pageRetries', '3')));
 		while (!done && saved < HARD) {
 			let rows;
-			try {
-				rows = await fetchWikidataBatchPaged({
-					yearFrom: a,
-					yearTo: b,
-					limit: pageSize,
-					offset,
-				});
-			} catch (e) {
-				// if a slice keeps failing, skip to next slice
-				console.warn(`slice ${a}-${b} error: ${e.message || e}; moving on`);
-				break;
+			let pageOk = false;
+			for (let attempt = 0; attempt <= pageRetries; attempt++) {
+				try {
+					rows = await fetchWikidataBatchPaged({
+						yearFrom: a,
+						yearTo: b,
+						limit: pageSize,
+						offset,
+					});
+					pageOk = true;
+					break;
+				} catch (e) {
+					if (attempt >= pageRetries) {
+						console.warn(
+							`slice ${a}-${b} offset=${offset} error after ${
+								attempt + 1
+							} tries: ${e.message || e}; moving on`
+						);
+						break;
+					}
+					const backoff =
+						2000 * (attempt + 1) + Math.floor(Math.random() * 400);
+					if (DEBUG)
+						console.warn(
+							`slice ${a}-${b} offset=${offset} retry ${
+								attempt + 1
+							}/${pageRetries} in ${backoff} ms…`
+						);
+					await sleep(backoff);
+				}
 			}
+			if (!pageOk) break;
 			if (DEBUG) console.log(`offset=${offset} got=${rows.length}`);
 			if (!rows.length) break;
 
 			// build titles to license-check on Commons
 			const titles = [];
-			const ctx = [];
-			for (const r of rows) {
-				const title = commonsTitleFromUrl(r.commonsFile);
+			for (const f of rows) {
+				const title = commonsTitleFromUrl(f);
 				if (!title) continue;
 				titles.push(title);
-				ctx.push({ title, r });
 			}
 			if (titles.length) {
 				const counter = { inc: () => (saved += 1), get: () => saved };
-				await processBatch(titles, ctx, counter, HARD, quota);
+				await processBatch(titles, counter, HARD, quota);
 			}
 
 			offset += pageSize;
+			if (WD_DELAY_MS) {
+				if (DEBUG)
+					console.log(
+						`${new Date().toISOString()} : WD pause ${WD_DELAY_MS} ms before next page`
+					);
+				await sleep(WD_DELAY_MS);
+			}
 			await saveJSON(CHECKPOINT, {
 				sliceFrom: a,
 				sliceTo: b,
@@ -586,62 +648,73 @@ async function main() {
 		saved,
 		done: true,
 	});
-	console.log(
-		`${new Date().toISOString()} : Done. Saved ${saved} images. Metadata -> ${NDJSON}`
-	);
+	const summary = NO_NDJSON
+		? `${new Date().toISOString()} : Done. Saved ${saved} images.`
+		: `${new Date().toISOString()} : Done. Saved ${saved} images. Metadata -> ${NDJSON}`;
+	console.log(summary);
 }
 
-async function processBatch(titles, ctx, counter, HARD, quota) {
+async function processBatch(titles, counter, HARD, quota) {
 	// 1) license check on Commons (retry this batch a few times if it fails transiently)
 	let info;
-	for (let attempt = 1; attempt <= 3; attempt++) {
-		try {
-			info = await fetchCommonsInfo(titles);
-			break;
-		} catch (e) {
-			if (attempt >= 3) throw e;
-			const backoff =
-				1000 * attempt * attempt + Math.floor(Math.random() * 300);
-			if (DEBUG)
-				console.warn(
-					`Batch license lookup retry ${attempt}/3 in ${backoff} ms…`
-				);
-			await new Promise((r) => setTimeout(r, backoff));
+	if (!NO_LICENSE_FILTER) {
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				info = await fetchCommonsInfo(titles);
+				break;
+			} catch (e) {
+				if (attempt >= 3) throw e;
+				const backoff =
+					1000 * attempt * attempt + Math.floor(Math.random() * 300);
+				if (DEBUG)
+					console.warn(
+						`Batch license lookup retry ${attempt}/3 in ${backoff} ms…`
+					);
+				await new Promise((r) => setTimeout(r, backoff));
+			}
 		}
 	}
 	// 2) keep only PD/CC0
 	const todo = [];
-	for (const { title, r } of ctx) {
-		const meta = info.get(title);
-		if (!meta) continue;
-		if (!meta.isOpen) continue;
-		todo.push({ title, meta, r });
+	for (const title of titles) {
+		if (NO_LICENSE_FILTER) {
+			todo.push({
+				title,
+				meta: { licenseShort: 'UNKNOWN', url: filePathUrl(title) },
+			});
+		} else {
+			const meta = info.get(title);
+			if (!meta) continue;
+			if (!meta.isOpen) continue;
+			todo.push({ title, meta });
+		}
 	}
 	// 3) download in a small pool
 	await runPool(
 		todo,
-		async ({ title, meta, r }) => {
+		async ({ title, meta }) => {
 			// if (LIMIT > 0 && counter.get() >= HARD) return;
 			// Acquire a quota token to strictly enforce global limit with concurrency
 			const token = quota.take();
 			if (!token) return; // out of quota, skip
 			const url = filePathUrl(title);
-			const base = join(OUT_DIR, filename(r.title, r.creator, r.year));
+			// Build filename from Commons title only
+			const baseTitle = title.replace(/^File:/, '');
+			const safeBase = sanitize(baseTitle).replace(/\.[A-Za-z0-9]+$/, '');
+			const base = join(OUT_DIR, safeBase);
 			try {
 				const res = await downloadValidated(url, base);
 				// Only treat as a new saved image if not a duplicate
 				if (!res.skipped) {
-					await appendNDJSON(NDJSON, {
-						qid: r.qid,
-						title: r.title,
-						creator: r.creator,
-						year: r.year,
-						commons_title: title,
-						license: meta.licenseShort,
-						source_url: meta.url,
-						sha256: res.sha256,
-						bytes: res.bytes,
-					});
+					if (!NO_NDJSON) {
+						await appendNDJSON(NDJSON, {
+							commons_title: title,
+							license: meta.licenseShort,
+							source_url: meta.url,
+							sha256: res.sha256,
+							bytes: res.bytes,
+						});
+					}
 					counter.inc();
 					token.commit();
 					const total = counter.get();
