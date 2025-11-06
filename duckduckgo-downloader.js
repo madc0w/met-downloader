@@ -3,26 +3,14 @@
 // Example:
 //   node duckduckgo-downloader.js "https://duckduckgo.com/?t=ffab&q=science&ia=images&iax=images" ddg-science.png
 
-const query = 'space rocket';
-
-const DEFAULT_URL = `https://duckduckgo.com/?q=${query}&ia=images&iax=images`;
+const query = 'microbial life';
 
 async function main() {
-	const url = process.argv[2] || process.env.URL || DEFAULT_URL;
+	const url = `https://duckduckgo.com/?q=${query}&iar=images`;
 	// const screenshotPath = process.argv[3] || 'duckduckgo-science.png';
 	const limit = parseInt(process.argv[4] || process.env.LIMIT || '0', 10) || 0; // 0 = no explicit limit
 
-	// Lazy import to give a clearer error if dependency is missing
-	let puppeteer;
-	try {
-		puppeteer = require('puppeteer');
-	} catch (err) {
-		console.error(
-			'Puppeteer is not installed. Run: npm i puppeteer --save-dev or --save'
-		);
-		throw err;
-	}
-
+	const puppeteer = require('puppeteer');
 	const browser = await puppeteer.launch({
 		headless: true,
 		// Extra args improve compatibility on some environments
@@ -72,24 +60,22 @@ async function main() {
 			'img',
 		];
 
-		let found = false;
+		let isFound = false;
 		for (const sel of imageSelectors) {
 			try {
 				await page.waitForSelector(sel, { timeout: 15_000 });
 				const count = await page.$$eval(sel, (imgs) => imgs.length);
 				if (count > 0) {
 					console.log(`Found ${count} images with selector: ${sel}`);
-					found = true;
+					isFound = true;
 					break;
 				}
 			} catch {
 				// try next selector
 			}
 		}
-		if (!found) {
-			console.warn(
-				'No images found within timeout; proceeding to screenshot anyway.'
-			);
+		if (!isFound) {
+			console.warn('No images found within timeout');
 		}
 
 		// Optional: quick scroll to trigger lazy loading of more thumbs
@@ -108,14 +94,14 @@ async function main() {
 
 		// Iterative harvest: collect direct URLs, download, then scroll to load more
 		const seen = new Set();
-		let downloaded = 0;
+		let numDownloaded = 0;
 		const maxRounds = parseInt(process.env.ROUNDS || '15', 10) || 15; // how many harvest rounds
 		const pagesPerRound = parseInt(process.env.PAGES || '4', 10) || 4; // viewport heights per round
 		const pauseMs = parseInt(process.env.PAUSE || '600', 10) || 600; // pause between scroll steps
 
 		let noGrowth = 0;
 		for (let round = 1; round <= maxRounds; round++) {
-			if (limit && downloaded >= limit) break;
+			if (limit && numDownloaded >= limit) break;
 
 			const allUrls = await collectOriginalImageUrls(page, 0);
 			const newUrls = allUrls.filter((u) => !seen.has(u));
@@ -123,15 +109,15 @@ async function main() {
 			if (newUrls.length > 0) {
 				console.log(`Round ${round}: ${newUrls.length} new direct URL(s).`);
 				for (const u of newUrls) {
-					if (limit && downloaded >= limit) break;
+					if (limit && numDownloaded >= limit) break;
 					const ok = await downloadImage(u, outDir, { referer: url });
-					if (ok) downloaded++;
+					if (ok) numDownloaded++;
 				}
 			} else {
 				console.log(`Round ${round}: 0 new URLs discovered.`);
 			}
 
-			if (limit && downloaded >= limit) break;
+			if (limit && numDownloaded >= limit) break;
 
 			// Scroll a few pages to trigger more thumbnails
 			const beforeCount = await countThumbnails(page);
@@ -150,15 +136,15 @@ async function main() {
 		}
 
 		// If still nothing, fallback to click-based extraction
-		if (downloaded === 0) {
+		if (numDownloaded === 0) {
 			const clickedDownloaded = await downloadAllVisibleImages(page, {
 				limit,
 				referer: url,
 			});
-			downloaded += clickedDownloaded;
+			numDownloaded += clickedDownloaded;
 		}
 
-		console.log(`Downloaded ${downloaded} file(s) to images-duckduckgo/`);
+		console.log(`Downloaded ${numDownloaded} file(s) to images-duckduckgo/`);
 	} finally {
 		await browser.close().catch(() => {});
 	}
