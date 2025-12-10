@@ -314,10 +314,10 @@ async function downloadAndResizeImage(
 							const safeQuery = query
 								.replace(/[^a-zA-Z0-9]/g, '_')
 								.substring(0, 50);
-							const filename =
-								imageIndex === 1
-									? `${safeQuery}.jpg`
-									: `${safeQuery}_${imageIndex}.jpg`;
+							const filename = `${safeQuery}_${String(imageIndex).padStart(
+								2,
+								'0'
+							)}.jpg`;
 							const filePath = path.join(OUTPUT_DIR, filename);
 
 							// Handle duplicate filenames
