@@ -21,13 +21,53 @@ try {
 	process.exit(1);
 }
 
+function parseArgs() {
+	const args = process.argv.slice(2);
+	const options = {};
+
+	for (let i = 0; i < args.length; i++) {
+		if (args[i] === '--categories' && args[i + 1]) {
+			options.categories = args[i + 1].split(',').map((c) => c.trim());
+			i++;
+		}
+	}
+
+	return options;
+}
+
 async function main() {
+	const options = parseArgs();
+
 	// Load queries
 	const queriesData = JSON.parse(fs.readFileSync(QUERIES_FILE, 'utf-8'));
 
+	// Filter categories if specified
+	let categoriesToProcess = Object.keys(queriesData);
+	if (options.categories && options.categories.length > 0) {
+		const validCategories = options.categories.filter((c) => queriesData[c]);
+		const invalidCategories = options.categories.filter((c) => !queriesData[c]);
+
+		if (invalidCategories.length > 0) {
+			console.warn(
+				`Warning: Unknown categories ignored: ${invalidCategories.join(', ')}`
+			);
+		}
+
+		if (validCategories.length === 0) {
+			console.error('Error: No valid categories specified');
+			console.log(
+				`Available categories: ${Object.keys(queriesData).join(', ')}`
+			);
+			process.exit(1);
+		}
+
+		categoriesToProcess = validCategories;
+		console.log(`Filtering to categories: ${categoriesToProcess.join(', ')}`);
+	}
+
 	// Flatten all queries into a single array
 	const allQueries = [];
-	for (const category of Object.keys(queriesData)) {
+	for (const category of categoriesToProcess) {
 		for (const query of queriesData[category]) {
 			allQueries.push({ category, query });
 		}
