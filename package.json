@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "cloudinary": "^2.8.0",
     "puppeteer": "^24.24.1",
     "sharp": "^0.34.5"
   }
