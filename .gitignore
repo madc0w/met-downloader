@@ -3,3 +3,4 @@ images-commons-*
 node_modules
 *.jpg
 
+run.bat

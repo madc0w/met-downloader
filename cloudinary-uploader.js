@@ -4,9 +4,9 @@ const path = require('path');
 
 // Configure Cloudinary
 cloudinary.config({
-	cloud_name: 'dp33j1nkt',
-	api_key: '151282277896296',
-	api_secret: 'QbDmdZi1pBOSpRBnoUWj4uKrVMA',
+	cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+	api_key: process.env.CLOUDINARY_API_KEY,
+	api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
 const IMAGES_DIR = path.join(__dirname, 'images-queries');
